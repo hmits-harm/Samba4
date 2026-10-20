@@ -1,0 +1,198 @@
+- name: Detect existing directory
+  ansible.builtin.stat:
+    path: /var/lib/samba/private/sam.ldb
+  register: existing_domain
+- name: Check existing domain identity before changing it
+  ansible.builtin.command: samba-tool domain level show
+  register: existing_info
+  changed_when: false
+  when: existing_domain.stat.exists
+- name: Refuse a different existing domain
+  ansible.builtin.command: testparm -s --parameter-name=realm
+  changed_when: false
+  register: existing_realm
+  when: existing_domain.stat.exists
+- name: Validate existing database and realm
+  ansible.builtin.assert:
+    that:
+      - "'Domain function level' in existing_info.stdout"
+      - existing_realm.stdout | trim == samba_ad_realm
+    fail_msg: Existing domain does not match; no reprovisioning is allowed.
+  when: existing_domain.stat.exists
+- name: Disable conflicting standalone services
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: false
+    masked: true
+    state: stopped
+  loop: [smbd, nmbd, winbind]
+- name: Preserve distribution Samba configuration before initial provisioning
+  ansible.builtin.command:
+    argv: [mv, /etc/samba/smb.conf, /etc/samba/smb.conf.pre-ad]
+    removes: /etc/samba/smb.conf
+    creates: /etc/samba/smb.conf.pre-ad
+  when: not existing_domain.stat.exists
+- name: Provision the forest on the primary only
+  ansible.builtin.file:
+    path: /var/lib/samba
+    state: directory
+    mode: '0755'
+- name: Provision forest database on the primary only
+  ansible.builtin.command:
+    argv:
+      - samba-tool
+      - domain
+      - provision
+      - "--realm={{ samba_ad_realm }}"
+      - "--domain={{ samba_ad_netbios }}"
+      - --server-role=dc
+      - --dns-backend=SAMBA_INTERNAL
+      - "--function-level={{ samba_ad_functional_level }}"
+      - "--option=ad dc functional level={{ samba_ad_functional_level }}"
+      - "--site={{ samba_ad_site }}"
+      - "--host-name={{ inventory_hostname.split('.')[0] }}"
+      - "--host-ip={{ samba_ad_ipv4 }}"
+      - "--adminpass={{ samba_ad_admin_password }}"
+      - "--option=interfaces=lo {{ samba_ad_interface }}"
+      - --option=bind interfaces only=yes
+    creates: /var/lib/samba/private/sam.ldb
+  when: inventory_hostname == samba_ad_primary
+  no_log: true
+  register: provision_result
+  failed_when: false
+- name: Report sanitized provisioning failure
+  ansible.builtin.fail:
+    msg: "{{ (provision_result.stderr | default('')) | replace(samba_ad_admin_password, '[REDACTED]') }}"
+  when: inventory_hostname == samba_ad_primary and (provision_result.rc | default(0)) != 0
+- name: Point joining controller to established primary
+  ansible.builtin.copy:
+    content: |
+      search {{ samba_ad_domain }}
+      nameserver {{ hostvars[samba_ad_primary].samba_ad_ipv4 }}
+    dest: /etc/resolv.conf
+    mode: '0644'
+  when: inventory_hostname != samba_ad_primary and not existing_domain.stat.exists
+- name: Join additional writable controllers
+  ansible.builtin.command:
+    argv:
+      - samba-tool
+      - domain
+      - join
+      - "{{ samba_ad_domain }}"
+      - DC
+      - "--realm={{ samba_ad_realm }}"
+      - "--server={{ samba_ad_primary }}"
+      - "--option=ad dc functional level={{ samba_ad_functional_level }}"
+      - --dns-backend=SAMBA_INTERNAL
+      - "--site={{ samba_ad_site }}"
+      - --authentication-file=/etc/samba-ad/admin.auth
+      - --use-kerberos=required
+      - --option=client ldap sasl wrapping=seal
+      - "--option=interfaces=lo {{ samba_ad_interface }}"
+      - --option=bind interfaces only=yes
+    creates: /var/lib/samba/private/sam.ldb
+  when: inventory_hostname != samba_ad_primary
+  no_log: true
+- name: Install managed Samba configuration
+  ansible.builtin.template:
+    src: smb.conf.j2
+    dest: /etc/samba/smb.conf
+    mode: '0644'
+    validate: testparm -s %s
+  notify: Restart Samba
+- name: Configure Kerberos discovery
+  ansible.builtin.copy:
+    content: |
+      [libdefaults]
+        default_realm = {{ samba_ad_realm }}
+        dns_lookup_realm = false
+        dns_lookup_kdc = true
+        rdns = false
+    dest: /etc/krb5.conf
+    mode: '0644'
+- name: Keep NetworkManager from replacing controller resolver settings
+  ansible.builtin.copy:
+    content: |
+      [main]
+      dns=none
+    dest: /etc/NetworkManager/conf.d/90-samba-ad-dns.conf
+    mode: '0644'
+  register: nm_dns
+- name: Reload NetworkManager configuration without changing addressing
+  ansible.builtin.command: nmcli general reload conf
+  when: nm_dns.changed
+- name: Configure local DNS and peer fallback
+  ansible.builtin.copy:
+    content: |
+      search {{ samba_ad_domain }}
+      nameserver {{ samba_ad_ipv4 }}
+      {% for host in groups.samba4 | reject('equalto', inventory_hostname) %}
+      nameserver {{ hostvars[host].samba_ad_ipv4 }}
+      {% endfor %}
+    dest: /etc/resolv.conf
+    mode: '0644'
+- name: Enable DC service
+  ansible.builtin.file:
+    path: /var/lib/samba/ntp_signd
+    state: directory
+    owner: root
+    group: winbindd_priv
+    mode: '0750'
+- name: Enable provisioned DC service
+  ansible.builtin.systemd_service:
+    name: samba-ad-dc
+    masked: false
+    enabled: true
+    state: started
+- ansible.builtin.meta: flush_handlers
+- name: Wait for DNS
+  ansible.builtin.command:
+    argv: [dig, '@127.0.0.1', "{{ samba_ad_domain }}", SOA, +short]
+  changed_when: false
+  register: dns_ready
+  until: dns_ready.stdout | length > 0
+  retries: 15
+  delay: 2
+- name: Apply agreed password policy
+  ansible.builtin.command: >-
+    samba-tool domain passwordsettings set --complexity=on
+    --history-length=24 --min-pwd-length=14 --min-pwd-age=0 --max-pwd-age=0
+    --account-lockout-duration=15 --account-lockout-threshold=10
+    --reset-account-lockout-after=15
+  changed_when: false
+  when: inventory_hostname == samba_ad_primary
+- name: List DNS zones
+  ansible.builtin.command: samba-tool sites subnet list {{ samba_ad_site }}
+  changed_when: false
+  register: site_subnets
+  when: inventory_hostname == samba_ad_primary
+- name: Map approved client networks to the Lab AD site
+  ansible.builtin.command:
+    argv: [samba-tool, sites, subnet, create, "{{ item }}", "{{ samba_ad_site }}"]
+  loop: "{{ samba_ad_allowed_subnets + samba_ad_ipv6_allowed_subnets }}"
+  when: inventory_hostname == samba_ad_primary and item not in site_subnets.stdout
+- name: List AD-integrated DNS zones
+  ansible.builtin.command: samba-tool dns zonelist {{ inventory_hostname }} -A /etc/samba-ad/admin.auth
+  changed_when: false
+  register: zones
+  no_log: true
+  when: inventory_hostname == samba_ad_primary
+- name: Create reverse DNS zone
+  ansible.builtin.command: samba-tool dns zonecreate {{ inventory_hostname }} 51.168.192.in-addr.arpa -A /etc/samba-ad/admin.auth
+  when: inventory_hostname == samba_ad_primary and '51.168.192.in-addr.arpa' not in zones.stdout
+  no_log: true
+- name: Query controller PTR records
+  ansible.builtin.command:
+    argv: [samba-tool, dns, query, "{{ inventory_hostname }}", 51.168.192.in-addr.arpa, "{{ hostvars[item].samba_ad_ipv4.split('.')[-1] }}", PTR, -A, /etc/samba-ad/admin.auth]
+  loop: "{{ groups.samba4 }}"
+  register: ptr_records
+  failed_when: false
+  changed_when: false
+  no_log: true
+  when: inventory_hostname == samba_ad_primary
+- name: Add missing controller PTR records
+  ansible.builtin.command:
+    argv: [samba-tool, dns, add, "{{ inventory_hostname }}", 51.168.192.in-addr.arpa, "{{ hostvars[item.item].samba_ad_ipv4.split('.')[-1] }}", PTR, "{{ item.item }}", -A, /etc/samba-ad/admin.auth]
+  loop: "{{ ptr_records.results | default([]) }}"
+  when: inventory_hostname == samba_ad_primary and item.rc != 0
+  no_log: true

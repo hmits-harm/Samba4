@@ -1,0 +1,31 @@
+- name: Change SYSVOL source on reachable controllers
+  hosts: samba4
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - ansible.builtin.assert:
+        that:
+          - samba_ad_sysvol_source in groups.samba4
+          - samba_ad_sysvol_source in ansible_play_hosts_all
+    - name: Verify selected source
+      ansible.builtin.command: samba-tool ntacl sysvolcheck
+      delegate_to: "{{ samba_ad_sysvol_source }}"
+      run_once: true
+      changed_when: false
+    - name: Stop synchronization during transition
+      ansible.builtin.systemd_service:
+        name: samba-ad-sysvol-sync.timer
+        state: stopped
+    - name: Wait for active copy to finish
+      ansible.builtin.command: flock /run/lock/samba-ad-sysvol.lock true
+      changed_when: false
+    - ansible.builtin.template:
+        src: ../roles/samba_ad/templates/sysvol-sync.j2
+        dest: /usr/local/sbin/samba-ad-sysvol-sync
+        mode: '0700'
+    - ansible.builtin.command: /usr/local/sbin/samba-ad-sysvol-sync
+      changed_when: false
+    - ansible.builtin.systemd_service:
+        name: samba-ad-sysvol-sync.timer
+        state: started

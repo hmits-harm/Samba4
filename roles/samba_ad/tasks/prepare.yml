@@ -1,0 +1,171 @@
+- name: Validate platform and selected Ethernet address
+  ansible.builtin.stat:
+    path: /var/lib/samba/private/sam.ldb
+  register: samba_ad_database
+- name: Validate platform and selected Ethernet address before changes
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == 'Debian'
+      - ansible_facts.distribution_major_version == '13'
+      - ansible_facts.architecture == 'aarch64'
+      - samba_ad_ipv4 in ansible_facts[samba_ad_interface].ipv4.values()
+      - groups.samba4[0] == samba_ad_primary
+      - samba_ad_sysvol_source in groups.samba4
+- name: Record current Ethernet IPv6 addresses without changing them
+  ansible.builtin.set_fact:
+    samba_ad_ipv6: "{{ ansible_facts[samba_ad_interface].ipv6 | default([]) | rejectattr('scope', 'equalto', 'link') | map(attribute='address') | reject('equalto', '::1') | list }}"
+- name: Install supported distribution packages without starting an unconfigured DC
+  ansible.builtin.apt:
+    name: [samba-ad-dc, samba-dsdb-modules, samba-vfs-modules, winbind, krb5-user, chrony, dnsutils, ldap-utils, smbclient, rsync, nftables, openssl, python3-cryptography, acl]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    policy_rc_d: 101
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+- name: Create operational directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop:
+    - /etc/samba/tls
+    - /etc/samba-ad
+    - /var/log/samba-ad
+    - /var/backups/samba-ad/staging
+    - /var/backups/samba-ad/incoming
+    - /root/.ssh
+- name: Set consistent hostname
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+- name: Define controller names independently of external DNS
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s+'
+    state: absent
+- name: Detect cloud-init host management
+  ansible.builtin.stat:
+    path: /etc/cloud/cloud.cfg.d
+  register: cloud_config
+- name: Prevent cloud-init restoring loopback controller names on reboot
+  ansible.builtin.copy:
+    content: |
+      manage_etc_hosts: false
+      preserve_hostname: true
+    dest: /etc/cloud/cloud.cfg.d/99-samba-ad-hosts.cfg
+    mode: '0644'
+  when: cloud_config.stat.exists
+- name: Define Ethernet controller names independently of external DNS
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: '# {mark} ANSIBLE SAMBA AD'
+    block: |
+      {% for host in groups.samba4 %}
+      {{ hostvars[host].samba_ad_ipv4 }} {{ host }} {{ host.split('.')[0] }}
+      {% endfor %}
+- name: Generate server TLS private key
+  community.crypto.openssl_privatekey:
+    path: /etc/samba/tls/server.key
+    size: 3072
+    mode: '0600'
+  when: not samba_ad_external_ca
+- name: Generate server TLS request
+  community.crypto.openssl_csr:
+    path: /etc/samba/tls/server.csr
+    privatekey_path: /etc/samba/tls/server.key
+    common_name: "{{ inventory_hostname }}"
+    subject_alt_name: "{{ ['DNS:' ~ inventory_hostname, 'IP:' ~ samba_ad_ipv4] + samba_ad_ipv6 | map('regex_replace', '^', 'IP:') | list }}"
+    extended_key_usage: [serverAuth]
+    key_usage: [digitalSignature, keyEncipherment]
+  when: not samba_ad_external_ca
+- name: Fetch public certificate request
+  ansible.builtin.fetch:
+    src: /etc/samba/tls/server.csr
+    dest: "{{ samba_ad_artifacts }}/{{ inventory_hostname }}.csr"
+    flat: true
+  when: not samba_ad_external_ca
+- name: Sign request on controller; CA key never leaves controller
+  ansible.builtin.stat:
+    path: "{{ samba_ad_artifacts }}/{{ inventory_hostname }}.crt"
+  register: issued_cert
+  delegate_to: localhost
+  become: false
+  when: not samba_ad_external_ca
+- name: Check certificate renewal window
+  community.crypto.x509_certificate_info:
+    path: "{{ samba_ad_artifacts }}/{{ inventory_hostname }}.crt"
+    valid_at:
+      renewal: '+30d'
+  register: cert_validity
+  delegate_to: localhost
+  become: false
+  when: not samba_ad_external_ca and issued_cert.stat.exists
+- name: Sign or renew request on controller; CA key never leaves controller
+  community.crypto.x509_certificate:
+    path: "{{ samba_ad_artifacts }}/{{ inventory_hostname }}.crt"
+    csr_path: "{{ samba_ad_artifacts }}/{{ inventory_hostname }}.csr"
+    ownca_path: "{{ samba_ad_artifacts }}/ca.crt"
+    ownca_privatekey_path: "{{ samba_ad_artifacts }}/ca.key"
+    ownca_not_after: '+365d'
+    provider: ownca
+    force: "{{ issued_cert.stat.exists and not (cert_validity.valid_at.renewal | default(true)) }}"
+  delegate_to: localhost
+  become: false
+  when: not samba_ad_external_ca
+- name: Install certificate, optional external private key, and chain
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - src: "{{ samba_ad_external_cert if samba_ad_external_ca else samba_ad_artifacts ~ '/' ~ inventory_hostname ~ '.crt' }}"
+      dest: /etc/samba/tls/server.crt
+      mode: '0644'
+    - src: "{{ samba_ad_external_chain if samba_ad_external_ca else samba_ad_artifacts ~ '/ca.crt' }}"
+      dest: /etc/samba/tls/ca.crt
+      mode: '0644'
+  notify: Restart Samba
+- name: Install externally supplied private key
+  ansible.builtin.copy:
+    src: "{{ samba_ad_external_key }}"
+    dest: /etc/samba/tls/server.key
+    mode: '0600'
+  no_log: true
+  when: samba_ad_external_ca
+  notify: Restart Samba
+- name: Trust issuing CA locally
+  ansible.builtin.copy:
+    src: /etc/samba/tls/ca.crt
+    dest: /usr/local/share/ca-certificates/lab-ad.crt
+    remote_src: true
+    mode: '0644'
+  register: ca_trust
+- ansible.builtin.command: update-ca-certificates
+  when: ca_trust.changed
+- name: Install private authentication file
+  ansible.builtin.copy:
+    content: |
+      username = Administrator@{{ samba_ad_realm }}
+      password = {{ samba_ad_admin_password }}
+      domain = {{ samba_ad_netbios }}
+    dest: /etc/samba-ad/admin.auth
+    mode: '0600'
+  no_log: true
+- name: Configure domain time service
+  ansible.builtin.template:
+    src: chrony.conf.j2
+    dest: /etc/chrony/chrony.conf
+    mode: '0644'
+  notify: Restart Chrony
+- name: Permit Chrony to use Samba signed-time socket
+  ansible.builtin.user:
+    name: _chrony
+    groups: _chrony,winbindd_priv
+    append: true
+- name: Enable time service
+  ansible.builtin.systemd_service:
+    name: chrony
+    enabled: true
+    state: started

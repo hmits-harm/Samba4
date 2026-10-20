@@ -1,0 +1,60 @@
+- name: Verify deployed AD services
+  hosts: samba4
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Validate server health
+      ansible.builtin.command: /usr/local/sbin/samba-ad-health
+      changed_when: false
+    - name: Read SYSVOL using Kerberos and SMB encryption
+      ansible.builtin.command:
+        argv: [smbclient, "//{{ inventory_hostname }}/sysvol", -A, /etc/samba-ad/admin.auth, --use-kerberos=required, --client-protection=encrypt, -c, ls]
+      changed_when: false
+    - name: Reject clients limited to unencrypted SMB2
+      ansible.builtin.command:
+        argv: [smbclient, "//{{ inventory_hostname }}/sysvol", -A, /etc/samba-ad/admin.auth, --use-kerberos=required, --max-protocol=SMB2_10, --option=client min protocol=SMB2_02, -c, ls]
+      changed_when: false
+      register: insecure_smb
+      failed_when: insecure_smb.rc == 0
+    - name: Reject cleartext LDAP password binds before password validation
+      ansible.builtin.command:
+        argv: [ldapsearch, -x, -H, "ldap://{{ inventory_hostname }}", -D, "CN=Administrator,CN=Users,DC=lab,DC=hmits", -w, intentionally-invalid-test-password, -b, '', -s, base, defaultNamingContext]
+      changed_when: false
+      register: insecure_ldap
+      failed_when: "'Strong(er) authentication required' not in insecure_ldap.stderr"
+    - name: Read rootDSE using trusted LDAPS
+      ansible.builtin.command:
+        argv: [ldapsearch, -x, -H, "ldaps://{{ inventory_hostname }}", -b, '', -s, base, defaultNamingContext]
+      environment:
+        LDAPTLS_CACERT: /etc/samba/tls/ca.crt
+        LDAPTLS_REQCERT: demand
+      changed_when: false
+    - name: Find an incoming encrypted backup
+      ansible.builtin.find:
+        paths: /var/backups/samba-ad/incoming
+        recurse: true
+        patterns: '*.cms'
+      register: incoming
+    - ansible.builtin.assert:
+        that: incoming.matched > 0
+    - name: Fetch one encrypted archive from each receiver
+      ansible.builtin.fetch:
+        src: "{{ (incoming.files | sort(attribute='mtime') | last).path }}"
+        dest: "{{ playbook_dir }}/../.artifacts/verify-{{ inventory_hostname }}.cms"
+        flat: true
+    - name: Decrypt and list the archive on the trusted controller only
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        openssl cms -decrypt -binary -inform DER
+        -in {{ (playbook_dir ~ '/../.artifacts/verify-' ~ inventory_hostname ~ '.cms') | quote }}
+        -recip {{ (playbook_dir ~ '/../.artifacts/backup-recovery.crt') | quote }}
+        -inkey {{ (playbook_dir ~ '/../.artifacts/backup-recovery.key') | quote }}
+        | tar -tf -
+      args:
+        executable: /bin/bash
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      register: decrypted
+      failed_when: decrypted.rc != 0 or 'recovery.tar.gz' not in decrypted.stdout or 'samba-backup-' not in decrypted.stdout

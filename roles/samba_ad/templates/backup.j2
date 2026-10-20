@@ -1,0 +1,21 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+exec 9>/run/lock/samba-ad-backup.lock
+flock -n 9 || exit 0
+stage=$(mktemp -d /var/backups/samba-ad/staging/job.XXXXXXXX)
+trap 'rm -rf -- "$stage"' EXIT
+echo "$(date -Is) backup started"
+samba-tool domain backup offline --targetdir="$stage"
+tar -C / -czf "$stage/recovery.tar.gz" etc/samba etc/samba-ad etc/krb5.conf etc/chrony
+archive="{{ inventory_hostname }}-$(date -u +%Y%m%dT%H%M%SZ).cms"
+mapfile -t bundle_files < <(find "$stage" -maxdepth 1 -type f -printf '%f\n')
+tar -C "$stage" -cf "$stage/recovery-bundle.tar" "${bundle_files[@]}"
+openssl cms -encrypt -binary -aes256 -in "$stage/recovery-bundle.tar" \
+  -outform DER -out "$stage/$archive" /etc/samba-ad/backup-recovery.crt
+rsync -t --timeout=120 \
+  -e 'ssh -i /root/.ssh/samba-ad-backup -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10' \
+  "$stage/$archive" root@{{ hostvars[samba_ad_backup_target].samba_ad_ipv4 }}:/
+find /var/backups/samba-ad/incoming -type f -name '*.cms' -mtime +{{ samba_ad_backup_retention_days }} -delete
+date -Is > /var/log/samba-ad/backup-last-success
+echo "$(date -Is) encrypted backup delivered: $archive"

@@ -1,0 +1,8 @@
+[Unit]
+Description=Schedule Samba AD {{ item.name }}
+[Timer]
+OnCalendar={{ item.calendar }}
+RandomizedDelaySec={{ item.delay }}
+Persistent=true
+[Install]
+WantedBy=timers.target

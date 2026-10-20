@@ -1,0 +1,3 @@
+ansible_host: 192.168.51.60
+samba_ad_ipv4: 192.168.51.60
+samba_ad_backup_target: pi16002.lab.hmits

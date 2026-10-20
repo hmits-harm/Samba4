@@ -1,0 +1,12 @@
+- name: Restart Samba
+  ansible.builtin.systemd_service:
+    name: samba-ad-dc
+    state: restarted
+  when: existing_domain is defined or samba_ad_database.stat.exists
+- name: Restart Chrony
+  ansible.builtin.systemd_service:
+    name: chrony
+    state: restarted
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true

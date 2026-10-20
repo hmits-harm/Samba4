@@ -1,0 +1,30 @@
+[global]
+    netbios name = {{ inventory_hostname.split('.')[0] | upper }}
+    realm = {{ samba_ad_realm }}
+    workgroup = {{ samba_ad_netbios }}
+    server role = active directory domain controller
+    ad dc functional level = {{ samba_ad_functional_level }}
+    interfaces = lo {{ samba_ad_interface }}
+    bind interfaces only = yes
+    dns forwarder = {{ samba_ad_forwarder }}
+    server min protocol = SMB3_00
+    server smb encrypt = required
+    client smb encrypt = required
+    server signing = mandatory
+    ntlm auth = disabled
+    ldap server require strong auth = yes
+    client ldap sasl wrapping = seal
+    tls enabled = yes
+    tls keyfile = /etc/samba/tls/server.key
+    tls certfile = /etc/samba/tls/server.crt
+    tls cafile = /etc/samba/tls/ca.crt
+    rpc server dynamic port range = {{ samba_ad_rpc_ports }}
+    log file = /var/log/samba/log.%m
+    max log size = 10000
+    log level = 1 auth_audit:3
+[sysvol]
+    path = /var/lib/samba/sysvol
+    read only = No
+[netlogon]
+    path = /var/lib/samba/sysvol/{{ samba_ad_domain }}/scripts
+    read only = No

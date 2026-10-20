@@ -1,0 +1,8 @@
+- name: Add directory objects on the SYSVOL source
+  hosts: samba4
+  become: true
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_role:
+        name: ../roles/samba_ad_objects
+      when: inventory_hostname == samba_ad_sysvol_source

@@ -1,0 +1,32 @@
+{% set ipv6 = namespace(networks=samba_ad_ipv6_allowed_subnets | list) %}
+{% for host in groups.samba4 %}
+{% for addr in hostvars[host].samba_ad_ipv6 | default([]) %}
+{% set ipv6.networks = ipv6.networks + [addr ~ '/128'] %}
+{% endfor %}
+{% endfor %}
+destroy table inet samba_ad
+table inet samba_ad {
+  set ad4 { type ipv4_addr; flags interval; elements = { {{ samba_ad_allowed_subnets | join(', ') }} } }
+  set ssh4 { type ipv4_addr; flags interval; elements = { {{ samba_ad_ssh_subnets | join(', ') }} } }
+  set ad6 { type ipv6_addr; flags interval;
+{% if ipv6.networks | length > 0 %}
+    elements = { {{ ipv6.networks | unique | join(', ') }} }
+{% endif %}
+  }
+  chain input {
+    type filter hook input priority 0; policy drop;
+    ct state established,related accept
+    ct state invalid drop
+    iifname "lo" accept
+    ip protocol icmp accept
+    meta l4proto ipv6-icmp accept
+    udp sport 67 udp dport 68 accept
+    udp sport 547 udp dport 546 accept
+    ip saddr @ssh4 tcp dport 22 accept
+    ip6 saddr @ad6 tcp dport 22 accept
+    ip saddr @ad4 tcp dport { 53, 88, 135, 139, 389, 445, 464, 636, 3268, 3269, {{ samba_ad_rpc_ports }} } accept
+    ip saddr @ad4 udp dport { 53, 88, 123, 137, 138, 389, 464 } accept
+    ip6 saddr @ad6 tcp dport { 53, 88, 135, 139, 389, 445, 464, 636, 3268, 3269, {{ samba_ad_rpc_ports }} } accept
+    ip6 saddr @ad6 udp dport { 53, 88, 123, 137, 138, 389, 464 } accept
+  }
+}
