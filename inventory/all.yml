@@ -9,6 +9,14 @@ all:
         pi16001.lab.hmits:
         pi16002.lab.hmits:
         pi16003.lab.hmits:
+    freeipa:
+      children:
+        ipaservers:
+          hosts:
+            pi8003.lab.hmits:
+        ipareplicas:
+          hosts:
+            pi8004.lab.hmits:
     workers:
       hosts:
         pi8001.lab.hmits:

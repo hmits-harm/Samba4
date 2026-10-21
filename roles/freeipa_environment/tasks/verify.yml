@@ -1,0 +1,157 @@
+- name: Read replicated IPA root CA certificate
+  ansible.builtin.slurp:
+    src: /etc/ipa/ca.crt
+  register: ipa_root_ca
+- name: Require the replica to share the primary CA rather than create another CA
+  ansible.builtin.assert:
+    that: ipa_root_ca.content == hostvars[ipa_primary].ipa_root_ca.content
+  when: ipa_primary in ansible_play_hosts_all
+- name: Verify all IPA services
+  ansible.builtin.command: ipactl status
+  changed_when: false
+- name: Verify authoritative DNS
+  ansible.builtin.command: dig @127.0.0.1 ipa.hmits SOA +short
+  register: ipa_soa
+  changed_when: false
+  failed_when: ipa_soa.stdout | length == 0
+- name: Verify AD discovery through IPA DNS
+  ansible.builtin.command: dig @127.0.0.1 _ldap._tcp.dc._msdcs.lab.hmits SRV +short
+  register: ad_discovery
+  changed_when: false
+  failed_when: ad_discovery.stdout | length == 0
+- name: Verify SSH trusts DNS SSHFP records
+  ansible.builtin.command: ssh -G localhost
+  changed_when: false
+  register: ssh_policy
+  failed_when: "'verifyhostkeydns true' not in ssh_policy.stdout and 'verifyhostkeydns yes' not in ssh_policy.stdout"
+- name: Verify synchronized time
+  ansible.builtin.command: chronyc tracking
+  changed_when: false
+- name: Require healthy directory and CA replication agreements to the peer
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import ldap
+        import ldap.sasl
+        from urllib.parse import quote
+        conn = ldap.initialize('ldapi://' + quote('/run/slapd-{{ ipa_realm | replace(".", "-") }}.socket', safe=''))
+        conn.sasl_interactive_bind_s('', ldap.sasl.external())
+        agreements = conn.search_s('cn=config', ldap.SCOPE_SUBTREE,
+            '(objectClass=nsDS5ReplicationAgreement)',
+            ['nsDS5ReplicaHost', 'nsDS5ReplicaRoot', 'nsds5ReplicaLastUpdateStatus'])
+        peer = '{{ hostvars[ipa_replica if inventory_hostname == ipa_primary else ipa_primary].ipa_fqdn }}'
+        roots = set()
+        for dn, values in agreements:
+            attrs = {k.lower(): v for k, v in values.items()}
+            if attrs.get('nsds5replicahost', [b''])[0].decode().lower() != peer:
+                continue
+            root = attrs['nsds5replicaroot'][0].decode().lower()
+            status = attrs.get('nsds5replicalastupdatestatus', [b''])[0].decode()
+            print(peer, root, status)
+            assert status.startswith(('Error (0)', '0 ')), 'Replication has not succeeded: ' + status
+            roots.add(root)
+        assert {'dc=ipa,dc=hmits', 'o=ipaca'}.issubset(roots), 'Missing directory or CA replication agreement'
+  changed_when: false
+  register: ipa_replication_health
+  until: ipa_replication_health.rc == 0
+  retries: 8
+  delay: 5
+- name: Verify service roles, trust direction and cross-realm Kerberos
+  environment:
+    KRB5CCNAME: FILE:/run/freeipa-environment-verify.ccache
+    KRB5_CONFIG: /run/freeipa-environment-verify.conf
+  block:
+    - name: Force verification to use this node's own IPA KDC
+      ansible.builtin.copy:
+        content: |
+          [libdefaults]
+            default_realm = {{ ipa_realm }}
+            dns_lookup_kdc = false
+            dns_lookup_realm = false
+            rdns = false
+            forwardable = true
+          [realms]
+            {{ ipa_realm }} = {
+              kdc = {{ ipa_ipv4 }}
+            }
+            {{ ipa_ad_realm }} = {
+          {% for address in ipa_ad_servers %}
+              kdc = {{ address }}
+          {% endfor %}
+            }
+          [domain_realm]
+            .{{ ipa_domain }} = {{ ipa_realm }}
+            {{ ipa_domain }} = {{ ipa_realm }}
+            .{{ ipa_ad_domain }} = {{ ipa_ad_realm }}
+            {{ ipa_ad_domain }} = {{ ipa_ad_realm }}
+          [capaths]
+            {{ ipa_ad_realm }} = {
+              {{ ipa_realm }} = .
+            }
+            {{ ipa_realm }} = {
+              {{ ipa_ad_realm }} = .
+            }
+        dest: /run/freeipa-environment-verify.conf
+        mode: '0600'
+    - name: Obtain temporary IPA administration ticket
+      ansible.builtin.command: kinit admin@IPA.HMITS
+      args:
+        stdin: "{{ ipaadmin_password }}"
+      no_log: true
+      changed_when: false
+    - name: Require DNS, CA, KRA and trust-controller roles on each server
+      ansible.builtin.command: ipa server-role-find --server={{ ipa_fqdn }} --status=enabled --all --raw
+      register: ipa_roles
+      changed_when: false
+      failed_when: >-
+        ipa_roles.rc != 0 or 'CA server' not in ipa_roles.stdout or
+        'KRA server' not in ipa_roles.stdout or 'DNS server' not in ipa_roles.stdout or
+        'AD trust controller' not in ipa_roles.stdout
+    - name: Require bidirectional forest trust
+      ansible.builtin.command: ipa topologysegment-find {{ item }} --all --raw
+      loop: [domain, ca]
+      register: ipa_topology
+      changed_when: false
+      failed_when: >-
+        ipa_topology.rc != 0 or
+        hostvars[ipa_primary].ipa_fqdn not in ipa_topology.stdout or
+        hostvars[ipa_replica].ipa_fqdn not in ipa_topology.stdout
+    - name: Require stored trust to be bidirectional
+      ansible.builtin.command: ipa trust-show lab.hmits --all --raw
+      register: ipa_trust_info
+      changed_when: false
+      failed_when: >-
+        ipa_trust_info.rc != 0 or 'ipanttrustdirection: 3' not in (ipa_trust_info.stdout | lower)
+    - name: Verify HBAC allow_all remains absent
+      ansible.builtin.command: ipa hbacrule-find --all --raw
+      register: ipa_hbac
+      changed_when: false
+      failed_when: >-
+        (ipa_hbac.rc != 0 and not (ipa_hbac.rc == 1 and '0 HBAC rules matched' in ipa_hbac.stdout)) or
+        'cn: allow_all' in ipa_hbac.stdout
+    - name: Resolve an AD identity without granting login access
+      ansible.builtin.command: getent passwd administrator@lab.hmits
+      changed_when: false
+      register: ipa_ad_identity
+      until: ipa_ad_identity.rc == 0
+      retries: 8
+      delay: 5
+    - name: Obtain temporary AD ticket to test trust authentication
+      ansible.builtin.command: kinit Administrator@LAB.HMITS
+      args:
+        stdin: "{{ ansible_password }}"
+      no_log: true
+      changed_when: false
+    - name: Request IPA HTTP service ticket across the forest trust
+      ansible.builtin.command: kvno HTTP/{{ ipa_fqdn }}@IPA.HMITS
+      changed_when: false
+  always:
+    - name: Remove temporary verification credentials
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /run/freeipa-environment-verify.ccache
+        - /run/freeipa-environment-verify.conf

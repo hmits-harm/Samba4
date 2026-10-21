@@ -1,0 +1,8 @@
+- name: Verify FreeIPA services, replication and trust on both nodes
+  hosts: freeipa
+  become: true
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_role:
+        name: ../roles/freeipa_environment
+        tasks_from: verify

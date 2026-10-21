@@ -1,0 +1,53 @@
+ipa_domain: ipa.hmits
+ipa_realm: IPA.HMITS
+ipa_netbios: IPA
+ipa_primary: pi8003.lab.hmits
+ipa_replica: pi8004.lab.hmits
+ipa_upstream_dns: 192.168.51.1
+ipa_allowed_subnets: [192.168.51.0/24, 192.168.7.0/24]
+ipa_ntp_subnets: [192.168.51.0/24]
+ipa_ad_domain: lab.hmits
+ipa_ad_realm: LAB.HMITS
+ipa_ad_primary: pi16001.lab.hmits
+ipa_ad_servers: [192.168.51.60, 192.168.51.61, 192.168.51.62]
+ipa_reverse_zone: 51.168.192.in-addr.arpa
+ipaadmin_principal: admin
+ipaadmin_password: "{{ ansible_password }}"
+ipadm_password: "{{ ansible_password }}"
+ipaserver_domain: "{{ ipa_domain }}"
+ipaserver_realm: "{{ ipa_realm }}"
+ipaserver_hostname: "{{ ipa_fqdn }}"
+ipaserver_ip_addresses: ["{{ ipa_ipv4 }}"]
+ipaserver_setup_dns: true
+ipaserver_setup_kra: true
+ipaserver_setup_adtrust: true
+ipaserver_no_hbac_allow: true
+ipaserver_no_reverse: true
+ipaserver_netbios_name: "{{ ipa_netbios }}"
+ipaserver_forwarders: ["{{ ipa_upstream_dns }}"]
+ipaserver_forward_policy: only
+ipaserver_setup_firewalld: false
+ipaserver_packages_adtrust: [ipa-server-trust-ad]
+ipaserver_no_host_dns: true
+ipareplica_setup_dns: true
+ipareplica_servers: [pi8003.ipa.hmits]
+ipareplica_domain: "{{ ipa_domain }}"
+ipareplica_ip_addresses: ["{{ ipa_ipv4 }}"]
+ipareplica_netbios_name: "{{ ipa_netbios }}"
+ipareplica_master_password: "{{ ansible_password }}"
+ipareplica_setup_ca: true
+ipareplica_setup_kra: true
+ipareplica_setup_adtrust: true
+ipareplica_no_reverse: true
+ipareplica_forwarders: ["{{ ipa_upstream_dns }}"]
+ipareplica_forward_policy: only
+ipareplica_setup_firewalld: false
+ipareplica_packages_adtrust: [ipa-server-trust-ad]
+ipareplica_no_host_dns: true
+ipaclient_ssh_trust_dns: true
+ipaclient_no_ntp: true
+ipaclient_mkhomedir: true
+ipaclient_servers: [pi8003.ipa.hmits]
+ipaserver: [pi8003.ipa.hmits]
+ansible_ssh_common_args: '-o UserKnownHostsFile={{ inventory_dir }}/../.artifacts/ipa_known_hosts -o StrictHostKeyChecking=yes'
+ansible_host_key_checking: true

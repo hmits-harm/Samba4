@@ -1,0 +1,22 @@
+- name: Install loopback-only conditional forwarding proxy
+  ansible.builtin.apt:
+    name: unbound
+    state: present
+    policy_rc_d: 101
+- name: Configure private IPA forwarding with existing upstream for all other names
+  ansible.builtin.template:
+    src: unbound.conf.j2
+    dest: /etc/unbound/unbound.conf.d/freeipa.conf
+    mode: '0644'
+  register: proxy_config
+- name: Remove unused validator anchor configuration for this forwarding-only iterator
+  ansible.builtin.file:
+    path: /etc/unbound/unbound.conf.d/root-auto-trust-anchor-file.conf
+    state: absent
+- name: Validate Unbound configuration
+  ansible.builtin.command: unbound-checkconf
+  changed_when: false
+- ansible.builtin.systemd_service:
+    name: unbound
+    enabled: true
+    state: "{{ 'restarted' if proxy_config.changed else 'started' }}"

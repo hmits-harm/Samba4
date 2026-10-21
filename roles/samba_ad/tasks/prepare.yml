@@ -169,3 +169,8 @@
     name: chrony
     enabled: true
     state: started
+- name: Prepare optional IPA conditional forwarding before configuring AD DNS
+  ansible.builtin.include_role:
+    name: freeipa_environment
+    tasks_from: dns_proxy
+  when: samba_ad_ipa_forwarding | default(false) | bool

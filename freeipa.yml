@@ -1,0 +1,83 @@
+- name: Prepare IPA hosts and bootstrap name resolution
+  hosts: freeipa
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - ansible.builtin.import_role:
+        name: freeipa_environment
+        tasks_from: prepare
+
+- name: Install IPA primary with replicated CA and KRA services
+  hosts: ipaservers
+  become: true
+  any_errors_fatal: true
+  roles:
+    - freeipa.ansible_freeipa.ipaserver
+
+- name: Install IPA replica with DNS, CA, KRA and trust controller
+  hosts: ipareplicas
+  become: true
+  serial: 1
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Require pi8004 to clone pi8003 with every requested service role
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == ipa_replica
+          - ipareplica_servers == [hostvars[ipa_primary].ipa_fqdn]
+          - ipareplica_setup_dns | bool
+          - ipareplica_setup_ca | bool
+          - ipareplica_setup_kra | bool
+          - ipareplica_setup_adtrust | bool
+    - name: Resolve through established IPA primary during enrollment
+      ansible.builtin.copy:
+        content: |
+          search {{ ipa_domain }}
+          nameserver {{ hostvars[ipa_primary].ipa_ipv4 }}
+        dest: /etc/resolv.conf
+        mode: '0644'
+  roles:
+    - freeipa.ansible_freeipa.ipareplica
+
+- name: Configure IPA DNS and disable broad HBAC access
+  hosts: freeipa
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - ansible.builtin.import_role:
+        name: freeipa_environment
+        tasks_from: configure
+
+- name: Gather AD peer addresses for trust firewall configuration
+  hosts: samba4
+  become: true
+  tasks:
+    - ansible.builtin.set_fact:
+        samba_ad_ipv6: "{{ ansible_facts[samba_ad_interface].ipv6 | default([]) | selectattr('scope', 'equalto', 'global') | map(attribute='address') | list }}"
+
+- name: Provide Samba DNS resolution of the IPA namespace
+  hosts: samba4
+  become: true
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - ansible.builtin.import_role:
+        name: freeipa_environment
+        tasks_from: samba_dns
+
+- name: Create and verify two-way forest trust
+  hosts: ipaservers
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - ansible.builtin.import_role:
+        name: freeipa_environment
+        tasks_from: trust
+
+- name: Verify IPA services on both nodes
+  hosts: freeipa
+  become: true
+  tasks:
+    - ansible.builtin.import_role:
+        name: freeipa_environment
+        tasks_from: verify

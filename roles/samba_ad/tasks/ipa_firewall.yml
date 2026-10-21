@@ -1,0 +1,12 @@
+- name: Admit current IPA trust peers through existing AD firewall
+  ansible.builtin.template:
+    src: firewall.nft.j2
+    dest: /etc/samba-ad/firewall.nft
+    mode: '0600'
+    validate: nft --check --file %s
+  register: ipa_ad_firewall
+- name: Apply updated AD trust firewall rules
+  ansible.builtin.systemd_service:
+    name: samba-ad-firewall
+    state: restarted
+  when: ipa_ad_firewall.changed

@@ -1,0 +1,43 @@
+- name: Ensure AD service recovers from transient startup failures
+  ansible.builtin.include_role:
+    name: samba_ad
+    tasks_from: service_recovery
+- name: Prepare conditional forwarding proxy
+  ansible.builtin.import_tasks: dns_proxy.yml
+- name: Admit IPA trust peers to existing AD services over IPv4 and IPv6
+  ansible.builtin.include_role:
+    name: samba_ad
+    tasks_from: ipa_firewall
+- name: Route Samba external queries through conditional forwarding proxy
+  ansible.builtin.lineinfile:
+    path: /etc/samba/smb.conf
+    regexp: '^\s*dns forwarder\s*='
+    line: '    dns forwarder = {{ ipa_forward_proxy }}'
+    validate: testparm -s %s
+  register: samba_proxy
+- ansible.builtin.systemd_service:
+    name: samba-ad-dc
+    state: restarted
+  when: samba_proxy.changed
+- name: Verify IPA service discovery from AD DNS
+  ansible.builtin.command: dig @127.0.0.1 _ldap._tcp.ipa.hmits SRV +short
+  register: ipa_discovery
+  changed_when: false
+  until: ipa_discovery.stdout | length > 0
+  retries: 10
+  delay: 3
+- name: Inspect IPA PTR records in existing reverse authority
+  ansible.builtin.command:
+    argv: [samba-tool, dns, query, "{{ inventory_hostname }}", 51.168.192.in-addr.arpa, "{{ hostvars[item].ipa_ipv4.split('.')[-1] }}", PTR, -A, /etc/samba-ad/admin.auth, --use-kerberos=required]
+  loop: "{{ groups.freeipa }}"
+  when: inventory_hostname == samba_ad_primary
+  changed_when: false
+  failed_when: ipa_ptr.rc != 0 and 'WERR_DNS_ERROR_NAME_DOES_NOT_EXIST' not in ipa_ptr.stderr
+  register: ipa_ptr
+- name: Add missing IPA PTR records without replacing existing data
+  ansible.builtin.command:
+    argv: [samba-tool, dns, add, "{{ inventory_hostname }}", 51.168.192.in-addr.arpa, "{{ hostvars[item.item].ipa_ipv4.split('.')[-1] }}", PTR, "{{ hostvars[item.item].ipa_fqdn }}", -A, /etc/samba-ad/admin.auth, --use-kerberos=required]
+  loop: "{{ ipa_ptr.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: inventory_hostname == samba_ad_primary and item.rc != 0

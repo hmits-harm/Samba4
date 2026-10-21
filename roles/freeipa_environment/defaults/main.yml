@@ -1,0 +1,2 @@
+ipa_ntp_pool: nl.pool.ntp.org
+ipa_forward_proxy: 127.0.0.1:5354
