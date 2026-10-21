@@ -1,4 +1,5 @@
 samba_ad_site: Lab
+samba_ad_ntlm_auth: ntlmv2-only
 samba_ad_functional_level: '2016'
 samba_ad_artifacts: "{{ playbook_dir }}/.artifacts"
 samba_ad_external_ca: false

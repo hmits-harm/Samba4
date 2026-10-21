@@ -11,7 +11,7 @@
     server smb encrypt = required
     client smb encrypt = required
     server signing = mandatory
-    ntlm auth = disabled
+    ntlm auth = {{ samba_ad_ntlm_auth }}
     ldap server require strong auth = yes
     client ldap sasl wrapping = seal
     tls enabled = yes

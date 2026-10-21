@@ -23,7 +23,10 @@ addresses. Include intermediate certificates in the server certificate file and
 trust anchors in the chain file. Distribute new trust first, rerun deployment,
 then verify every LDAPS endpoint. No external CA private key is required.
 
-SMB3 encryption is required; signing is mandatory and NTLM disabled. LDAP rejects
+SMB3 encryption is required; signing is mandatory and NTLMv2 is enabled for
+client enrollment compatibility (`samba_ad_ntlm_auth: ntlmv2-only`). NTLMv1 is
+not enabled. To apply this policy independently, run
+`ansible-playbook playbooks/configure-ad-authentication.yml`. LDAP rejects
 cleartext password binds and enforces TLS channel binding; outbound SASL uses
 sealing. **Samba strong-auth LDAP still permits signed-only SASL** on port 389.
 DNS, discovery and initial NTP are not universally encrypted. The role therefore
