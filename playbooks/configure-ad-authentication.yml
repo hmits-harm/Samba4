@@ -1,0 +1,10 @@
+- name: Apply and verify AD authentication policy on each controller
+  hosts: samba4
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - ansible.builtin.include_role:
+        name: ../roles/samba_ad
+        tasks_from: authentication

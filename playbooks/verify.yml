@@ -11,6 +11,11 @@
       ansible.builtin.command:
         argv: [smbclient, "//{{ inventory_hostname }}/sysvol", -A, /etc/samba-ad/admin.auth, --use-kerberos=required, --client-protection=encrypt, -c, ls]
       changed_when: false
+    - name: Read SYSVOL using NTLMv2 with Kerberos explicitly disabled
+      ansible.builtin.command:
+        argv: [smbclient, "//{{ inventory_hostname }}/sysvol", -A, /etc/samba-ad/admin.auth, --use-kerberos=off, --client-protection=encrypt, '--option=client ntlmv2 auth=yes', -c, ls]
+      changed_when: false
+      when: (samba_ad_ntlm_auth | default('ntlmv2-only')) == 'ntlmv2-only'
     - name: Reject clients limited to unencrypted SMB2
       ansible.builtin.command:
         argv: [smbclient, "//{{ inventory_hostname }}/sysvol", -A, /etc/samba-ad/admin.auth, --use-kerberos=required, --max-protocol=SMB2_10, --option=client min protocol=SMB2_02, -c, ls]

@@ -1,0 +1,18 @@
+- name: Require an explicit supported NTLM policy
+  ansible.builtin.assert:
+    that: samba_ad_ntlm_auth in ['ntlmv2-only', 'disabled']
+- name: Apply managed Samba configuration with selected authentication policy
+  ansible.builtin.template:
+    src: smb.conf.j2
+    dest: /etc/samba/smb.conf
+    mode: '0644'
+    validate: testparm -s %s
+  register: samba_auth_config
+- name: Reload Samba configuration without interrupting directory replication
+  ansible.builtin.command: smbcontrol all reload-config
+  when: samba_auth_config.changed
+- name: Verify NTLMv2 authentication with Kerberos explicitly disabled
+  ansible.builtin.command:
+    argv: [smbclient, "//{{ inventory_hostname }}/sysvol", -A, /etc/samba-ad/admin.auth, --use-kerberos=off, --client-protection=encrypt, '--option=client ntlmv2 auth=yes', -c, ls]
+  changed_when: false
+  when: samba_ad_ntlm_auth == 'ntlmv2-only'
