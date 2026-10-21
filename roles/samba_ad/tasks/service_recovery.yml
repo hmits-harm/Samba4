@@ -1,0 +1,37 @@
+- name: Remove loopback hostname mapping restored outside the role
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s+'
+    state: absent
+- name: Restore controller hostname mappings to Ethernet addresses
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: '# {mark} ANSIBLE SAMBA AD'
+    block: |
+      {% for host in groups.samba4 %}
+      {{ hostvars[host].samba_ad_ipv4 }} {{ host }} {{ host.split('.')[0] }}
+      {% endfor %}
+- name: Create Samba service override directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/samba-ad-dc.service.d
+    state: directory
+    mode: '0755'
+- name: Retry Samba after transient address availability failures
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/samba-ad-dc.service.d/recovery.conf
+    mode: '0644'
+    content: |
+      [Unit]
+      Wants=network-online.target
+      After=network-online.target
+      [Service]
+      Restart=on-failure
+      RestartSec=15s
+  register: samba_recovery
+- name: Load Samba recovery policy and ensure service is running
+  ansible.builtin.systemd_service:
+    name: samba-ad-dc
+    daemon_reload: "{{ samba_recovery.changed }}"
+    enabled: true
+    state: started
+  when: samba_ad_database is not defined or samba_ad_database.stat.exists

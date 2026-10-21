@@ -1,5 +1,11 @@
 # Samba AD on Raspberry Pi 5 / Debian 13
 
+See [AD service listeners and startup recovery](docs/AD-SERVICES.md) for expected
+ports and diagnosis when several controller services disappear together.
+
+For the FreeIPA deployment on pi8003/pi8004, see [FreeIPA setup](docs/FREEIPA.md)
+and run the separate `freeipa.yml` entrypoint.
+
 Three writable controllers, new forest `lab.hmits`, realm `LAB.HMITS`, short
 domain `LAB`, site `Lab`, functional level 2016. Initial FSMO and SYSVOL source:
 `pi16001`. The other controllers are `pi16002` and `pi16003`.

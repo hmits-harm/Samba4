@@ -1,0 +1,17 @@
+server:
+    interface: 127.0.0.1
+    port: {{ ipa_forward_proxy.rsplit(':', 1)[1] }}
+    access-control: 127.0.0.0/8 allow
+    do-ip6: no
+    module-config: "iterator"
+    local-zone: "ipa.hmits." transparent
+forward-zone:
+    name: "ipa.hmits."
+{% for host in groups.freeipa %}
+    forward-addr: {{ hostvars[host].ipa_ipv4 }}
+{% endfor %}
+    forward-first: no
+forward-zone:
+    name: "."
+    forward-addr: {{ hostvars[groups.freeipa[0]].ipa_upstream_dns }}
+    forward-first: no

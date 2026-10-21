@@ -8,7 +8,10 @@ samba_ad_allowed_subnets:
   - 192.168.51.0/24
   - 192.168.7.0/24
 samba_ad_ssh_subnets: "{{ samba_ad_allowed_subnets }}"
-samba_ad_forwarder: 192.168.51.1
+samba_ad_ipv6_allowed_subnets: "{{ groups.freeipa | default([]) | map('extract', hostvars, 'ipa_ipv6_service_addresses') | flatten | map('regex_replace', '$', '/128') | list }}"
+samba_ad_upstream_dns: 192.168.51.1
+samba_ad_ipa_forwarding: true
+samba_ad_forwarder: "{{ (ipa_forward_proxy | default('127.0.0.1:5354')) if samba_ad_ipa_forwarding else samba_ad_upstream_dns }}"
 samba_ad_client_resolver: 192.168.51.1
 samba_ad_ntp_pool: nl.pool.ntp.org
 samba_ad_admin_password: "{{ ansible_password }}"

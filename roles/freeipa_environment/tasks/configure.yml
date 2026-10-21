@@ -1,0 +1,85 @@
+- name: Exempt private unsigned AD zones from public DNSSEC chain validation
+  ansible.builtin.blockinfile:
+    path: /etc/named/ipa-options-ext.conf
+    marker: '/* {mark} ANSIBLE PRIVATE AD DNS */'
+    block: |
+      validate-except { "{{ ipa_ad_domain }}"; "{{ ipa_reverse_zone }}"; };
+  register: ipa_private_dns
+- name: Validate BIND configuration
+  ansible.builtin.command: named-checkconf
+  changed_when: false
+- name: Apply private-zone validation exceptions
+  ansible.builtin.systemd_service:
+    name: named
+    state: restarted
+  when: ipa_private_dns.changed
+- name: Check local Directory Manager accepts the requested vaulted password
+  community.general.ldap_search:
+    server_uri: 'ldaps://{{ ipa_fqdn }}'
+    ca_path: /etc/ipa/ca.crt
+    validate_certs: true
+    bind_dn: cn=Directory Manager
+    bind_pw: "{{ ipadm_password }}"
+    dn: cn=config
+    scope: base
+    attrs: [cn]
+  register: ipa_dm_bind
+  failed_when: false
+  no_log: true
+- name: Reconcile replica Directory Manager password generated during cloning
+  community.general.ldap_attrs:
+    server_uri: 'ldapi://%2Frun%2Fslapd-{{ ipa_realm | replace(".", "-") }}.socket'
+    sasl_class: external
+    dn: cn=config
+    attributes:
+      nsslapd-rootpw: "{{ ipadm_password }}"
+    state: exact
+  when: ipa_dm_bind.results is not defined
+  no_log: true
+- name: Verify Directory Manager password after reconciliation
+  community.general.ldap_search:
+    server_uri: 'ldaps://{{ ipa_fqdn }}'
+    ca_path: /etc/ipa/ca.crt
+    validate_certs: true
+    bind_dn: cn=Directory Manager
+    bind_pw: "{{ ipadm_password }}"
+    dn: cn=config
+    scope: base
+    attrs: [cn]
+  no_log: true
+- name: Use local IPA DNS with peer fallback
+  ansible.builtin.copy:
+    content: |
+      search {{ ipa_domain }}
+      nameserver {{ ipa_ipv4 }}
+      {% for host in groups.freeipa | reject('equalto', inventory_hostname) %}
+      nameserver {{ hostvars[host].ipa_ipv4 }}
+      {% endfor %}
+    dest: /etc/resolv.conf
+    mode: '0644'
+- name: Disable allow_all if present, without creating any access grants
+  ansible.builtin.fetch:
+    src: /etc/ipa/ca.crt
+    dest: "{{ playbook_dir }}/.artifacts/ipa-ca.crt"
+    flat: true
+  when: inventory_hostname == ipa_primary
+- name: Ensure broad HBAC rule is absent
+  freeipa.ansible_freeipa.ipahbacrule:
+    ipaadmin_password: "{{ ipaadmin_password }}"
+    name: allow_all
+    state: absent
+  when: inventory_hostname == ipa_primary
+  no_log: true
+- name: Forward AD and shared reverse zones to their existing Samba authority
+  freeipa.ansible_freeipa.ipadnsforwardzone:
+    ipaadmin_password: "{{ ipaadmin_password }}"
+    name: "{{ item }}"
+    forwarders:
+      - ip_address: "{{ ipa_ad_servers[0] }}"
+      - ip_address: "{{ ipa_ad_servers[1] }}"
+      - ip_address: "{{ ipa_ad_servers[2] }}"
+    forwardpolicy: only
+    skip_overlap_check: true
+  loop: ["{{ ipa_ad_domain }}", "{{ ipa_reverse_zone }}"]
+  when: inventory_hostname == ipa_primary
+  no_log: true

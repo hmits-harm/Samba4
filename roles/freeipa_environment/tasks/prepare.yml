@@ -1,0 +1,120 @@
+- name: Require AlmaLinux 10, fixed Ethernet address, and IPv6 support
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == 'AlmaLinux'
+      - ansible_facts.distribution_major_version == '10'
+      - ansible_facts.architecture == 'aarch64'
+      - ansible_facts[ipa_interface].ipv4.address == ipa_ipv4
+      - ipa_primary in groups.ipaservers
+      - ipa_replica in groups.ipareplicas
+      - groups.ipaservers | length == 1
+      - ipa_replica not in groups.ipaservers
+      - ipareplica_setup_ca | bool
+      - ipareplica_setup_kra | bool
+      - ipareplica_setup_dns | bool
+      - ipareplica_setup_adtrust | bool
+- name: Record current IPv6 service addresses without changing addressing
+  ansible.builtin.set_fact:
+    ipa_ipv6: "{{ ansible_facts[ipa_interface].ipv6 | default([]) | selectattr('scope', 'equalto', 'global') | map(attribute='address') | list }}"
+- name: Install preparation packages
+  ansible.builtin.dnf:
+    name: [chrony, firewalld, python3-firewall, bind-utils, python3-libselinux, samba-winbind-clients]
+    state: present
+- name: Set permanent IPA hostname independently of DHCP DNS
+  ansible.builtin.hostname:
+    name: "{{ ipa_fqdn }}"
+- name: Remove loopback mappings for server hostnames
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s+'
+    state: absent
+- name: Bootstrap both IPA FQDNs through Ethernet addresses
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^(127\.0\.0\.1|::1)\s+.*\b{{ ipa_fqdn.split(".")[0] }}(\.|\s|$)'
+    state: absent
+- name: Ensure normal IPv4 and IPv6 localhost mappings
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  loop:
+    - regexp: '^127\.0\.0\.1\s+'
+      line: '127.0.0.1 localhost localhost.localdomain'
+    - regexp: '^::1\s+'
+      line: '::1 localhost localhost.localdomain ip6-localhost ip6-loopback'
+- name: Bootstrap permanent IPA names through Ethernet addresses
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: '# {mark} ANSIBLE FREEIPA'
+    block: |
+      {% for host in groups.freeipa %}
+      {{ hostvars[host].ipa_ipv4 }} {{ hostvars[host].ipa_fqdn }} {{ hostvars[host].ipa_fqdn.split('.')[0] }}
+      {% endfor %}
+- name: Detect cloud-init
+  ansible.builtin.stat:
+    path: /etc/cloud/cloud.cfg.d
+  register: ipa_cloud
+- name: Preserve IPA hostname and host mappings across cloud-init runs
+  ansible.builtin.copy:
+    content: "manage_etc_hosts: false\npreserve_hostname: true\n"
+    dest: /etc/cloud/cloud.cfg.d/99-freeipa-hosts.cfg
+    mode: '0644'
+  when: ipa_cloud.stat.exists
+- name: Keep NetworkManager from replacing AD-aware resolver configuration
+  ansible.builtin.copy:
+    content: "[main]\ndns=none\n"
+    dest: /etc/NetworkManager/conf.d/90-freeipa-dns.conf
+    mode: '0644'
+  register: ipa_nm
+- ansible.builtin.command: nmcli general reload conf
+  when: ipa_nm.changed
+- name: Configure Chrony as upstream client and subnet time server
+  ansible.builtin.template:
+    src: chrony.conf.j2
+    dest: /etc/chrony.conf
+    mode: '0644'
+  register: ipa_chrony
+- ansible.builtin.systemd_service:
+    name: chronyd
+    enabled: true
+    state: "{{ 'restarted' if ipa_chrony.changed else 'started' }}"
+- name: Require synchronized time before Kerberos provisioning
+  ansible.builtin.command: chronyc waitsync 30 0.1 0.0 2
+  changed_when: false
+- ansible.builtin.systemd_service:
+    name: firewalld
+    enabled: true
+    state: started
+- name: Create restricted IPA firewall zone
+  ansible.posix.firewalld:
+    zone: ipa
+    state: present
+    permanent: true
+  register: ipa_zone
+- ansible.builtin.command: firewall-cmd --reload
+  when: ipa_zone.changed
+- name: Allow IPA access from approved networks
+  ansible.posix.firewalld:
+    zone: ipa
+    source: "{{ item }}"
+    state: enabled
+    permanent: true
+    immediate: true
+  loop: "{{ ipa_allowed_subnets + (groups.freeipa | map('extract', hostvars) | selectattr('ipa_ipv6', 'defined') | map(attribute='ipa_ipv6') | flatten | map('regex_replace', '$', '/128') | list) }}"
+- name: Open DNS, IPA, trust RPC, and SSH services in restricted zone
+  ansible.posix.firewalld:
+    zone: ipa
+    service: "{{ item }}"
+    state: enabled
+    permanent: true
+    immediate: true
+  loop: [dns, freeipa-4, freeipa-trust, ssh]
+- name: Restrict NTP service to requested IPv4 networks
+  ansible.posix.firewalld:
+    zone: ipa
+    rich_rule: 'rule family="ipv4" source address="{{ item }}" port port="123" protocol="udp" accept'
+    state: enabled
+    permanent: true
+    immediate: true
+  loop: "{{ ipa_ntp_subnets }}"

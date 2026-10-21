@@ -1,0 +1,34 @@
+- name: Create mutual forest trust using the FreeIPA collection
+  freeipa.ansible_freeipa.ipatrust:
+    ipaadmin_password: "{{ ipaadmin_password }}"
+    realm: "{{ ipa_ad_domain }}"
+    admin: Administrator@LAB.HMITS
+    password: "{{ ansible_password }}"
+    server: "{{ ipa_ad_primary }}"
+    two_way: true
+    range_type: ipa-ad-trust
+    state: present
+  no_log: true
+  register: ipa_trust_result
+  failed_when: false
+- name: Report sanitized trust-creation failure
+  ansible.builtin.fail:
+    msg: "{{ ipa_trust_result.msg | default('Trust creation failed') | replace(ansible_password, '[REDACTED]') }}"
+  when: ipa_trust_result.failed | default(false) or ipa_trust_result.msg is defined
+- name: Inspect corresponding Samba forest trust
+  ansible.builtin.command:
+    argv:
+      - samba-tool
+      - domain
+      - trust
+      - show
+      - "{{ ipa_domain }}"
+      - --local-dc-authentication-file=/etc/samba-ad/admin.auth
+      - --local-dc-use-kerberos=required
+  delegate_to: "{{ ipa_ad_primary }}"
+  changed_when: false
+  register: ipa_ad_trust_state
+- name: Require bidirectional trust on the AD side too
+  ansible.builtin.assert:
+    that:
+      - ipa_ad_trust_state.stdout is search('(?im)^Direction:\s+0x0*3\s+\(BOTH\)')

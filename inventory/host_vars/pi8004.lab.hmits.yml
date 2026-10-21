@@ -1,0 +1,5 @@
+ansible_host: 192.168.51.83
+ipa_ipv4: 192.168.51.83
+ipa_fqdn: pi8004.ipa.hmits
+ipa_interface: end0
+ipa_ipv6_service_addresses: ['2a02:a45c:43fe:2:2ecf:67ff:fe32:f0be']
