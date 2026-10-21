@@ -1,0 +1,13 @@
+pool {{ samba_ad_ntp_pool }} iburst
+driftfile /var/lib/chrony/chrony.drift
+makestep 1 3
+rtcsync
+ntpsigndsocket /var/lib/samba/ntp_signd
+{% for subnet in samba_ad_allowed_subnets + samba_ad_ipv6_allowed_subnets %}
+allow {{ subnet }}
+{% endfor %}
+{% for host in groups.samba4 %}
+{% for addr in hostvars[host].samba_ad_ipv6 | default([]) %}
+allow {{ addr }}/128
+{% endfor %}
+{% endfor %}

@@ -1,0 +1,7 @@
+#!/bin/bash
+set -euo pipefail
+echo "$(date -Is) checking available updates; installation requires user action"
+apt-get update
+apt list --upgradable
+if [[ -f /var/run/reboot-required ]]; then cat /var/run/reboot-required; fi
+date -Is > /var/log/samba-ad/updates-last-success

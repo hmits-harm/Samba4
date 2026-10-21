@@ -1,0 +1,43 @@
+- name: Prepare certificate authority on the Ansible controller
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tasks:
+    - ansible.builtin.import_tasks: roles/samba_ad/tasks/ca.yml
+
+- name: Prepare all domain controllers
+  hosts: samba4
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - ansible.builtin.import_role:
+        name: samba_ad
+        tasks_from: prepare
+
+- name: Provision and join controllers in order
+  hosts: samba4
+  become: true
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - ansible.builtin.import_role:
+        name: samba_ad
+        tasks_from: domain
+
+- name: Configure replication, backups, firewall and checks
+  hosts: samba4
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - ansible.builtin.import_role:
+        name: samba_ad
+        tasks_from: operations
+
+- name: Manage optional directory objects
+  hosts: samba4
+  become: true
+  tasks:
+    - ansible.builtin.include_role:
+        name: samba_ad_objects
+      when: inventory_hostname == samba_ad_sysvol_source

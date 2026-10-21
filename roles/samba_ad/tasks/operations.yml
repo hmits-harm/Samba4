@@ -1,0 +1,189 @@
+- name: Generate separate restricted SSH keys for backup and SYSVOL
+  ansible.builtin.command:
+    argv: [ssh-keygen, -t, ed25519, -N, '', -f, "/root/.ssh/samba-ad-{{ item }}"]
+    creates: "/root/.ssh/samba-ad-{{ item }}"
+  loop: [backup, sysvol]
+- name: Read backup SSH public key
+  ansible.builtin.slurp:
+    src: /root/.ssh/samba-ad-backup.pub
+  register: backup_pub
+- name: Read SYSVOL SSH public key
+  ansible.builtin.slurp:
+    src: /root/.ssh/samba-ad-sysvol.pub
+  register: sysvol_pub
+- name: Read host SSH public key
+  ansible.builtin.slurp:
+    src: /etc/ssh/ssh_host_ed25519_key.pub
+  register: ssh_host_pub
+- name: Create per-source incoming backup directories
+  ansible.builtin.file:
+    path: "/var/backups/samba-ad/incoming/{{ item }}"
+    state: directory
+    mode: '0700'
+  loop: "{{ groups.samba4 }}"
+  when: hostvars[item].samba_ad_backup_target == inventory_hostname
+- name: Authorize backup upload keys with forced write-only rsync
+  ansible.posix.authorized_key:
+    user: root
+    key: "{{ hostvars[item].backup_pub.content | b64decode }}"
+    key_options: 'restrict,from="{{ hostvars[item].samba_ad_ipv4 }}",command="/usr/bin/rrsync -wo -no-del -munge /var/backups/samba-ad/incoming/{{ item }}"'
+  loop: "{{ groups.samba4 }}"
+  when: hostvars[item].samba_ad_backup_target == inventory_hostname
+- name: Authorize SYSVOL read keys on every possible source for failover
+  ansible.posix.authorized_key:
+    user: root
+    key: "{{ hostvars[item].sysvol_pub.content | b64decode }}"
+    key_options: 'restrict,from="{{ hostvars[item].samba_ad_ipv4 }}",command="/usr/bin/rrsync -ro /var/lib/samba/sysvol"'
+  loop: "{{ groups.samba4 | reject('equalto', inventory_hostname) | list }}"
+- name: Pin SSH host keys without trust-on-first-use
+  ansible.builtin.known_hosts:
+    path: /root/.ssh/known_hosts
+    name: "{{ hostvars[item].samba_ad_ipv4 }}"
+    key: "{{ hostvars[item].samba_ad_ipv4 }} {{ (hostvars[item].ssh_host_pub.content | b64decode).split()[0:2] | join(' ') }}"
+  loop: "{{ groups.samba4 }}"
+- name: Install backup encryption certificate only
+  ansible.builtin.copy:
+    src: "{{ samba_ad_artifacts }}/backup-recovery.crt"
+    dest: /etc/samba-ad/backup-recovery.crt
+    mode: '0644'
+- name: Install operations scripts
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/usr/local/sbin/samba-ad-{{ item }}"
+    mode: '0700'
+  loop: [backup, sysvol-sync, health, updates]
+- name: Install operation services
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=Samba AD {{ item }}
+      After=network-online.target samba-ad-dc.service
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/samba-ad-{{ item }}
+      UMask=0077
+      StandardOutput=append:/var/log/samba-ad/{{ item }}.log
+      StandardError=append:/var/log/samba-ad/{{ item }}.log
+    dest: "/etc/systemd/system/samba-ad-{{ item }}.service"
+    mode: '0644'
+  loop: [backup, sysvol-sync, health, updates]
+  notify: Reload systemd
+- name: Install operation timers
+  ansible.builtin.template:
+    src: timer.j2
+    dest: "/etc/systemd/system/samba-ad-{{ item.name }}.timer"
+    mode: '0644'
+  loop:
+    - {name: backup, calendar: '*-*-* 02:00:00 Europe/Amsterdam', delay: 1800}
+    - {name: health, calendar: '*-*-* *:0/15:00', delay: 30}
+    - {name: updates, calendar: '*-*-* 09:00:00 Europe/Amsterdam', delay: 900}
+    - {name: sysvol-sync, calendar: '*-*-* *:*:00', delay: 0}
+  notify: Reload systemd
+- name: Disable unattended package installation
+  ansible.builtin.copy:
+    content: |
+      APT::Periodic::Unattended-Upgrade "0";
+    dest: /etc/apt/apt.conf.d/99-samba-ad-manual-upgrades
+    mode: '0644'
+- name: Rotate operational logs
+  ansible.builtin.copy:
+    content: |
+      /var/log/samba-ad/*.log {
+          daily
+          rotate 14
+          compress
+          missingok
+          notifempty
+          copytruncate
+          su root root
+      }
+    dest: /etc/logrotate.d/samba-ad
+    mode: '0644'
+- name: Render firewall preserving unrelated tables
+  ansible.builtin.template:
+    src: firewall.nft.j2
+    dest: /etc/samba-ad/firewall.nft
+    mode: '0600'
+    validate: nft --check --file %s
+  register: firewall
+- name: Install persistent firewall service
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=Samba AD firewall
+      Before=samba-ad-dc.service
+      After=network-pre.target
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/sbin/nft -f /etc/samba-ad/firewall.nft
+      ExecReload=/usr/sbin/nft -f /etc/samba-ad/firewall.nft
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/samba-ad-firewall.service
+    mode: '0644'
+  notify: Reload systemd
+- ansible.builtin.meta: flush_handlers
+- name: Enable firewall
+  ansible.builtin.systemd_service:
+    name: samba-ad-firewall
+    enabled: true
+    state: "{{ 'restarted' if firewall.changed else 'started' }}"
+- name: Enable operational timers
+  ansible.builtin.systemd_service:
+    name: "samba-ad-{{ item }}.timer"
+    enabled: true
+    state: started
+  loop: [backup, health, updates, sysvol-sync]
+- name: Configure primary KDC for initial directory convergence only
+  ansible.builtin.copy:
+    content: |
+      [libdefaults]
+        default_realm = {{ samba_ad_realm }}
+        dns_lookup_kdc = false
+      [realms]
+        {{ samba_ad_realm }} = {
+          kdc = {{ hostvars[samba_ad_primary].samba_ad_ipv4 }}
+        }
+    dest: /etc/samba-ad/bootstrap-krb5.conf
+    mode: '0600'
+- name: Recompute replication topology
+  ansible.builtin.command:
+    argv: [samba-tool, drs, kcc, "{{ inventory_hostname }}", -A, /etc/samba-ad/admin.auth, --use-kerberos=required]
+  changed_when: false
+  environment:
+    KRB5_CONFIG: /etc/samba-ad/bootstrap-krb5.conf
+- name: Verify every directory partition can replicate from a peer
+  ansible.builtin.command:
+    argv:
+      - samba-tool
+      - drs
+      - replicate
+      - "{{ inventory_hostname }}"
+      - "{{ item.0 }}"
+      - "{{ item.1 }}"
+      - -A
+      - /etc/samba-ad/admin.auth
+      - --use-kerberos=required
+  loop: "{{ groups.samba4 | reject('equalto', inventory_hostname) | product(samba_ad_naming_contexts) | list }}"
+  changed_when: false
+  environment:
+    KRB5_CONFIG: /etc/samba-ad/bootstrap-krb5.conf
+  register: partition_replication
+  until: partition_replication.rc == 0
+  retries: 5
+  delay: 3
+- name: Perform initial SYSVOL copy
+  ansible.builtin.command: /usr/local/sbin/samba-ad-sysvol-sync
+  changed_when: false
+- name: Create first encrypted backup and verify delivery
+  ansible.builtin.systemd_service:
+    name: samba-ad-backup.service
+    state: started
+- name: Validate directory health after first backup
+  ansible.builtin.command: /usr/local/sbin/samba-ad-health
+  changed_when: false
+  register: health_result
+  until: health_result.rc == 0
+  retries: 6
+  delay: 10

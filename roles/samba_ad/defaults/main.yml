@@ -1,0 +1,18 @@
+samba_ad_site: Lab
+samba_ad_functional_level: '2016'
+samba_ad_artifacts: "{{ playbook_dir }}/.artifacts"
+samba_ad_external_ca: false
+samba_ad_external_cert: ''
+samba_ad_external_key: ''
+samba_ad_external_chain: ''
+samba_ad_backup_retention_days: 14
+samba_ad_ipv6_allowed_subnets: []
+samba_ad_ipv6: "{{ ansible_facts[samba_ad_interface].ipv6 | default([]) | rejectattr('scope', 'equalto', 'link') | map(attribute='address') | reject('equalto', '::1') | list }}"
+samba_ad_rpc_ports: 49152-49252
+samba_ad_base_dn: "{{ 'DC=' ~ (samba_ad_domain | replace('.', ',DC=')) }}"
+samba_ad_naming_contexts:
+  - "{{ samba_ad_base_dn }}"
+  - "CN=Configuration,{{ samba_ad_base_dn }}"
+  - "CN=Schema,CN=Configuration,{{ samba_ad_base_dn }}"
+  - "DC=DomainDnsZones,{{ samba_ad_base_dn }}"
+  - "DC=ForestDnsZones,{{ samba_ad_base_dn }}"

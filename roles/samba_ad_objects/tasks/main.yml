@@ -1,0 +1,39 @@
+- name: Read desired OUs
+  ansible.builtin.command: samba-tool ou list
+  changed_when: false
+  register: current_ous
+- name: Create requested OUs (parents first)
+  ansible.builtin.command:
+    argv: [samba-tool, ou, create, "{{ item }}"]
+  loop: "{{ samba_ad_objects_ous }}"
+  when: item not in current_ous.stdout_lines
+- name: List groups
+  ansible.builtin.command: samba-tool group list
+  changed_when: false
+  register: current_groups
+- name: Create requested groups
+  ansible.builtin.command:
+    argv: [samba-tool, group, add, "{{ item }}"]
+  loop: "{{ samba_ad_objects_groups }}"
+  when: item not in current_groups.stdout_lines
+- name: List users
+  ansible.builtin.command: samba-tool user list
+  changed_when: false
+  register: current_users
+- name: Create requested users with vaulted initial passwords
+  ansible.builtin.command:
+    argv: [samba-tool, user, create, "{{ item.name }}", "{{ item.password }}", --must-change-at-next-login]
+  loop: "{{ samba_ad_objects_users }}"
+  when: item.name not in current_users.stdout_lines
+  no_log: true
+- name: List policies
+  ansible.builtin.command: samba-tool gpo listall -A /etc/samba-ad/admin.auth
+  changed_when: false
+  register: current_gpos
+  no_log: true
+- name: Create requested empty Group Policy objects
+  ansible.builtin.command:
+    argv: [samba-tool, gpo, create, "{{ item }}", -A, /etc/samba-ad/admin.auth]
+  loop: "{{ samba_ad_objects_gpos }}"
+  when: item not in current_gpos.stdout
+  no_log: true

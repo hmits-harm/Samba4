@@ -1,0 +1,41 @@
+- name: Create private controller artifact directory
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/.artifacts"
+    state: directory
+    mode: '0700'
+- name: Create LDAPS CA and separate backup recovery key
+  community.crypto.openssl_privatekey:
+    path: "{{ playbook_dir }}/.artifacts/{{ item }}.key"
+    type: RSA
+    size: 4096
+    mode: '0600'
+  loop: [ca, backup-recovery]
+- name: Create CA signing request
+  community.crypto.openssl_csr:
+    path: "{{ playbook_dir }}/.artifacts/ca.csr"
+    privatekey_path: "{{ playbook_dir }}/.artifacts/ca.key"
+    common_name: LAB.HMITS private root CA
+    basic_constraints: ['CA:TRUE']
+    basic_constraints_critical: true
+    key_usage: [keyCertSign, cRLSign]
+    key_usage_critical: true
+- name: Sign private root
+  community.crypto.x509_certificate:
+    path: "{{ playbook_dir }}/.artifacts/ca.crt"
+    csr_path: "{{ playbook_dir }}/.artifacts/ca.csr"
+    privatekey_path: "{{ playbook_dir }}/.artifacts/ca.key"
+    provider: selfsigned
+    selfsigned_not_after: '+3650d'
+- name: Create backup recovery request
+  community.crypto.openssl_csr:
+    path: "{{ playbook_dir }}/.artifacts/backup-recovery.csr"
+    privatekey_path: "{{ playbook_dir }}/.artifacts/backup-recovery.key"
+    common_name: LAB.HMITS backup recovery
+    key_usage: [keyEncipherment]
+- name: Create backup encryption certificate
+  community.crypto.x509_certificate:
+    path: "{{ playbook_dir }}/.artifacts/backup-recovery.crt"
+    csr_path: "{{ playbook_dir }}/.artifacts/backup-recovery.csr"
+    privatekey_path: "{{ playbook_dir }}/.artifacts/backup-recovery.key"
+    provider: selfsigned
+    selfsigned_not_after: '+3650d'

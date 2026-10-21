@@ -1,0 +1,28 @@
+- name: User-initiated rolling updates
+  hosts: samba4
+  become: true
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - name: Check all peers before each controller
+      ansible.builtin.command: /usr/local/sbin/samba-ad-health
+      delegate_to: "{{ item }}"
+      loop: "{{ groups.samba4 }}"
+      changed_when: false
+    - name: Create fresh backup
+      ansible.builtin.systemd_service:
+        name: samba-ad-backup.service
+        state: started
+    - name: Install updates requested by operator
+      ansible.builtin.apt:
+        update_cache: true
+        upgrade: dist
+    - ansible.builtin.reboot:
+        reboot_timeout: 600
+    - name: Wait for healthy replication before proceeding
+      ansible.builtin.command: /usr/local/sbin/samba-ad-health
+      changed_when: false
+      register: health
+      until: health.rc == 0
+      retries: 12
+      delay: 10

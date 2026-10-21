@@ -1,0 +1,11 @@
+#!/bin/bash
+set -euo pipefail
+exec 9>/run/lock/samba-ad-sysvol.lock
+flock -n 9 || exit 0
+{% if inventory_hostname != samba_ad_sysvol_source %}
+rsync -aAX --delete-delay --timeout=45 \
+  -e 'ssh -i /root/.ssh/samba-ad-sysvol -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10' \
+  root@{{ hostvars[samba_ad_sysvol_source].samba_ad_ipv4 }}:/ /var/lib/samba/sysvol/
+samba-tool ntacl sysvolcheck
+{% endif %}
+date -Is > /var/log/samba-ad/sysvol-last-success

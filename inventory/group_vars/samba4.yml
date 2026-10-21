@@ -1,0 +1,14 @@
+samba_ad_domain: lab.hmits
+samba_ad_realm: LAB.HMITS
+samba_ad_netbios: LAB
+samba_ad_primary: pi16001.lab.hmits
+samba_ad_sysvol_source: pi16001.lab.hmits
+samba_ad_interface: eth0
+samba_ad_allowed_subnets:
+  - 192.168.51.0/24
+  - 192.168.7.0/24
+samba_ad_ssh_subnets: "{{ samba_ad_allowed_subnets }}"
+samba_ad_forwarder: 192.168.51.1
+samba_ad_client_resolver: 192.168.51.1
+samba_ad_ntp_pool: nl.pool.ntp.org
+samba_ad_admin_password: "{{ ansible_password }}"
